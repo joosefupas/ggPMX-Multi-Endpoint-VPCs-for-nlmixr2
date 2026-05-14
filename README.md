@@ -422,33 +422,3 @@ range(pmx_pd$data$IND$IPRED, na.rm = TRUE)
 
 The PK range should be on the concentration scale, while the PD range should be on the effect scale.
 
-## Why this matters
-
-Without endpoint-aware filtering and merging, diagnostic plots can silently mix endpoints.
-
-For individual plots, this can create misleading saw-tooth prediction lines because PK and PD values are connected in the same line.
-
-For VPCs, this can create duplicated or inflated simulation datasets because simulation rows are merged to observed metadata using only `ID` and `TIME`.
-
-The patch reduces these risks by making endpoint handling explicit in both plot preparation and VPC simulation processing.
-
-## Limitations
-
-This is a prototype patch.
-
-It modifies functions in the active R session using `assignInNamespace()`.
-
-It does not permanently change the installed `ggPMX` package.
-
-The patch should be validated for each modeling workflow before use in formal reporting.
-
-## Uninstalling the patch in the current session
-
-If needed, restore the original functions:
-
-```r
-ggpmx_uninstall_pkpd_patch()
-```
-
-Restarting R also restores the original `ggPMX` behavior.
-
