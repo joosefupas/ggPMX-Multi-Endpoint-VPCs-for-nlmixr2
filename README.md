@@ -1,85 +1,332 @@
 # ggPMX PKPD Endpoint Patch for nlmixr2
 
-Endpoint-aware diagnostic plotting workflow for `nlmixr2` PK/PD models using `ggPMX`.
+This repository contains a session-level patch that extends the practical use of `ggPMX` with multi-endpoint `nlmixr2` PK/PD models.
 
-This repository provides a small patch layer that helps `ggPMX` handle multi-endpoint `nlmixr2` models, especially for separate PK and PD individual plots and visual predictive checks.
-
-## Overview
-
-Multi-endpoint PK/PD models often contain more than one observation type, for example:
+The main goal is to make `ggPMX::pmx_nlmixr()` and `ggPMX::pmx_plot_vpc()` work more reliably when a single `nlmixr2` fit contains more than one endpoint, for example:
 
 - `cp`: PK concentration endpoint
 - `pca`: PD effect endpoint
 
-This patch makes it easier to create endpoint-specific `ggPMX` controllers from a single `nlmixr2` fit object.
+The patch is designed to support endpoint-specific diagnostics from the same fitted model object.
 
-It supports:
+## Core problem
 
-- separate PK and PD individual plots
-- separate PK and PD VPCs
-- endpoint-filtered prediction datasets
-- endpoint-filtered simulation datasets
-- endpoint-aware merging of VPC simulations and observed metadata
+In multi-endpoint PK/PD models, a fitted `nlmixr2` object may contain observations from more than one endpoint at the same subject and time.
 
-## Files
+For example:
 
-### `ggpmx_pkpd_patch.R`
+```text
+ID   TIME   CMT
+1    24     cp
+1    24     pca
+```
 
-Patch script for the current R session.
+This is valid PK/PD data, but it can cause problems when plotting diagnostics if the endpoint is not included in filtering, grouping, or merging operations.
 
-It modifies selected `ggPMX` behavior after sourcing. The patch is applied automatically when the file is sourced.
+Two main issues were addressed.
+
+### 1. Individual plot endpoint mixing
+
+`ggPMX` may create an individual prediction dataset that contains both endpoints. In some cases, the endpoint column is carried as an unnamed column.
+
+This can lead to individual prediction lines that connect PK and PD values in the same subject panel.
+
+The resulting plot may show artificial vertical oscillations because the line jumps between endpoints on different scales.
+
+The patch fixes this by:
+
+- detecting the endpoint column
+- handling exact, case-insensitive, and unnamed endpoint columns
+- filtering controller datasets to the selected endpoint
+- ensuring the `IND` dataset used for individual plots contains only the requested endpoint
+
+### 2. VPC simulation merge issue
+
+For VPCs, simulated data are merged with observed metadata.
+
+The original merge logic uses:
+
+```r
+by = c("ID", "TIME")
+```
+
+This is insufficient for PK/PD models because `ID + TIME` may not be unique when multiple endpoints are present.
+
+The patch makes this merge endpoint-aware.
+
+If an endpoint column such as `CMT` or `DVID` is present in both datasets, the merge key becomes:
+
+```r
+by = c("ID", "TIME", "CMT")
+```
+
+or equivalently:
+
+```r
+by = c("ID", "TIME", "DVID")
+```
+
+depending on the endpoint column available.
+
+This prevents PK and PD records from being incorrectly joined during VPC construction.
+
+## What the patch does
+
+The patch modifies selected `ggPMX` behavior in the active R session.
+
+It does not permanently modify the installed `ggPMX` package.
+
+When sourced, the patch:
 
 ```r
 source("ggpmx_pkpd_patch.R")
 ```
 
-The patch does not permanently modify the installed `ggPMX` package. Restarting R restores the original package behavior unless the patch is sourced again.
+automatically installs patched versions of selected functions.
 
-### `01_warfarin_pkpd_ggpmx_example.R`
+## Main technical components
 
-Example script using the built-in `warfarin` dataset from `nlmixr2`.
+### `ggpmx_endpoint_code()`
 
-The script:
+Extracts the endpoint code from either:
 
-- defines a joint PK/PD turnover Emax model
-- fits the model with `nlmixr2`
-- creates separate `ggPMX` controllers for PK and PD
-- generates endpoint-specific individual plots
-- generates endpoint-specific VPCs
+- a `pmxEndpointClass` object
+- a character endpoint code
+- a numeric endpoint code
 
-## Requirements
-
-Required R packages:
+Example:
 
 ```r
-library(nlmixr2)
-library(ggPMX)
-library(ggplot2)
-library(data.table)
+ep_pk <- ggPMX::pmx_endpoint(
+  code = "cp",
+  label = "PK concentration"
+)
 ```
 
-Install packages if needed:
+The function extracts:
 
 ```r
-install.packages(c("ggplot2", "data.table", "ggPMX"))
-install.packages("nlmixr2")
+"cp"
 ```
 
-## Quick start
+### `ggpmx_scalar_dvid()`
 
-Source the patch:
+Normalizes the endpoint-identifying column name.
+
+For example:
+
+```r
+"CMT"
+```
+
+or:
+
+```r
+"DVID"
+```
+
+It returns `NULL` if no valid endpoint column is supplied.
+
+### `ggpmx_filter_endpoint_dt()`
+
+Filters a data frame or data table to a selected endpoint.
+
+It supports three cases:
+
+1. Endpoint column exists exactly:
+
+```r
+CMT
+```
+
+2. Endpoint column exists with different case:
+
+```r
+cmt
+```
+
+3. Endpoint column is unnamed, which can happen in the `ggPMX` individual prediction dataset.
+
+This is important because one observed issue was:
+
+```r
+names(pmx_pk$data$IND)
+```
+
+returning something like:
+
+```r
+"ID" "TIME" "" "IPRED" "PRED" "DV"
+```
+
+where the unnamed column contained endpoint values such as:
+
+```r
+cp
+pca
+```
+
+The patch detects this situation, renames the column to the endpoint identifier, and filters it.
+
+### `ggpmx_fix_endpoint_controller()`
+
+Applies endpoint filtering across the main parts of a `ggPMX` controller:
+
+- `ctr$input`
+- `ctr$data$predictions`
+- `ctr$data$IND`
+- `ctr$data$eta`
+- `ctr$sim$sim`, when present
+
+This ensures that a PK controller contains only PK rows and a PD controller contains only PD rows.
+
+### `ggpmx_endpoint_merge_by_auto()`
+
+Builds an endpoint-aware merge key for VPC simulation data.
+
+Default key:
+
+```r
+c("ID", "TIME")
+```
+
+If a common endpoint column is found in both datasets, it appends the endpoint column.
+
+Candidate endpoint columns include:
+
+```r
+DVID
+CMT
+YTYPE
+Endpoint
+endpoint
+dvid
+cmt
+ytype
+```
+
+For example, if both datasets contain `CMT`, the merge key becomes:
+
+```r
+c("ID", "TIME", "CMT")
+```
+
+### `ggpmx_merge_sim_input_endpoint_aware()`
+
+Replaces the non-endpoint-aware VPC merge.
+
+It:
+
+1. Converts simulation and input metadata to `data.table`
+2. Determines the correct merge key
+3. Collapses duplicated input metadata rows by the merge key
+4. Merges simulation data and input metadata safely
+
+This avoids many-to-many joins caused by multiple endpoints at the same time.
+
+### `ggpmx_add_nlmixr_vpc_to_controller()`
+
+Adds endpoint-aware VPC simulation data to a `ggPMX` controller.
+
+It:
+
+1. Clones the controller
+2. Filters the controller to one endpoint
+3. Runs `nlmixr2est::vpcSim()`
+4. Filters the simulation data to the selected endpoint
+5. Renames simulated response from `sim` to `DV`
+6. Builds a `pmx_sim` object
+7. Performs endpoint-aware merging with observed metadata
+8. Stores the result in:
+
+```r
+ctr$data$sim
+```
+
+and:
+
+```r
+ctr$sim
+```
+
+### `ggpmx_plot_vpc_direct()`
+
+Provides a fallback VPC plotting route.
+
+This function directly constructs the VPC plot using internal `ggPMX` VPC utilities after the endpoint-aware VPC dataset has been created.
+
+It is used when the standard `ggPMX::pmx_plot_vpc()` machinery does not return a plot for the patched controller.
+
+### Patched `ggPMX::pmx_nlmixr()`
+
+The patch wraps the original `ggPMX::pmx_nlmixr()`.
+
+The patched version:
+
+1. Calls the original function with `vpc = FALSE`
+2. Filters the resulting controller by endpoint
+3. Optionally creates endpoint-aware VPC simulation data if `vpc = TRUE`
+
+This allows calls such as:
+
+```r
+pmx_pk <- ggPMX::pmx_nlmixr(
+  fit = fit.TOS,
+  dvid = "CMT",
+  endpoint = ep_pk,
+  vpc = TRUE,
+  vpc_n = 300,
+  vpc_seed = 123
+)
+```
+
+### Patched `ggPMX::pmx_plot_vpc()`
+
+The patch also wraps `ggPMX::pmx_plot_vpc()`.
+
+The patched function first tries the original `ggPMX` plotting method.
+
+If that fails or returns `NULL`, it falls back to the direct VPC plotting function:
+
+```r
+ggpmx_plot_vpc_direct()
+```
+
+This allows the usual user-facing syntax:
+
+```r
+pmx_pk |> ggPMX::pmx_plot_vpc()
+```
+
+instead of requiring a separate custom plotting call.
+
+## Installation in the current R session
+
+Source the patch file:
 
 ```r
 source("ggpmx_pkpd_patch.R")
 ```
 
-Fit or load a multi-endpoint `nlmixr2` model:
+The patch auto-installs when sourced.
+
+To check that the patch is active:
 
 ```r
-fit_nm <- readRDS("fit_nm.RDS")
+attr(get("pmx_nlmixr", envir = asNamespace("ggPMX")), "ggpmx_pkpd_patch")
+
+attr(get("pmx_plot_vpc", envir = asNamespace("ggPMX")), "ggpmx_pkpd_patch")
 ```
 
-Define PK and PD endpoints:
+Both should return:
+
+```r
+TRUE
+```
+
+## Example workflow
+
+Define endpoints:
 
 ```r
 ep_pk <- ggPMX::pmx_endpoint(
@@ -93,11 +340,11 @@ ep_pd <- ggPMX::pmx_endpoint(
 )
 ```
 
-Create endpoint-specific `ggPMX` controllers:
+Create endpoint-specific controllers:
 
 ```r
 pmx_pk <- ggPMX::pmx_nlmixr(
-  fit = fit_nm,
+  fit = fit.TOS,
   dvid = "CMT",
   endpoint = ep_pk,
   vpc = TRUE,
@@ -106,7 +353,7 @@ pmx_pk <- ggPMX::pmx_nlmixr(
 )
 
 pmx_pd <- ggPMX::pmx_nlmixr(
-  fit = fit_nm,
+  fit = fit.TOS,
   dvid = "CMT",
   endpoint = ep_pd,
   vpc = TRUE,
@@ -131,41 +378,15 @@ pmx_pk |> ggPMX::pmx_plot_vpc()
 pmx_pd |> ggPMX::pmx_plot_vpc()
 ```
 
-## Example endpoints
+## Validation checks
 
-For the Warfarin PK/PD example:
+After creating the controllers, confirm that each controller contains only the intended endpoint.
 
-```r
-table(fit_nm$CMT)
-```
-
-Typical endpoint values are:
-
-```text
-cp   PK concentration
-pca  PD effect
-```
-
-These are passed to `pmx_endpoint()`:
-
-```r
-ep_pk <- ggPMX::pmx_endpoint(
-  code = "cp",
-  label = "PK concentration"
-)
-
-ep_pd <- ggPMX::pmx_endpoint(
-  code = "pca",
-  label = "PD effect"
-)
-```
-
-## Checking endpoint separation
-
-After creating the controllers, check that each controller contains only one endpoint.
+For individual plot data:
 
 ```r
 table(pmx_pk$data$IND$CMT, useNA = "ifany")
+
 table(pmx_pd$data$IND$CMT, useNA = "ifany")
 ```
 
@@ -176,10 +397,11 @@ pmx_pk: cp only
 pmx_pd: pca only
 ```
 
-Check the VPC simulation data:
+For VPC simulation data:
 
 ```r
 table(pmx_pk$data$sim$CMT, useNA = "ifany")
+
 table(pmx_pd$data$sim$CMT, useNA = "ifany")
 ```
 
@@ -190,72 +412,43 @@ pmx_pk: cp only
 pmx_pd: pca only
 ```
 
-## Saving plots
+Check prediction scales:
 
 ```r
-dir.create("figures", showWarnings = FALSE)
+range(pmx_pk$data$IND$IPRED, na.rm = TRUE)
 
-p_ind_pk <- pmx_pk |> ggPMX::pmx_plot_individual()
-p_ind_pd <- pmx_pd |> ggPMX::pmx_plot_individual()
-
-p_vpc_pk <- pmx_pk |> ggPMX::pmx_plot_vpc()
-p_vpc_pd <- pmx_pd |> ggPMX::pmx_plot_vpc()
-
-ggplot2::ggsave(
-  "figures/individual_PK.png",
-  p_ind_pk,
-  width = 14,
-  height = 10,
-  dpi = 600,
-  bg = "white"
-)
-
-ggplot2::ggsave(
-  "figures/individual_PD.png",
-  p_ind_pd,
-  width = 14,
-  height = 10,
-  dpi = 600,
-  bg = "white"
-)
-
-ggplot2::ggsave(
-  "figures/vpc_PK.png",
-  p_vpc_pk,
-  width = 12,
-  height = 8,
-  dpi = 600,
-  bg = "white"
-)
-
-ggplot2::ggsave(
-  "figures/vpc_PD.png",
-  p_vpc_pd,
-  width = 12,
-  height = 8,
-  dpi = 600,
-  bg = "white"
-)
+range(pmx_pd$data$IND$IPRED, na.rm = TRUE)
 ```
 
-## Recommended repository structure
+The PK range should be on the concentration scale, while the PD range should be on the effect scale.
 
-```text
-ggPMX-pkpd-endpoint-patch/
-├── README.md
-├── ggpmx_pkpd_patch.R
-├── 01_warfarin_pkpd_ggpmx_example.R
-└── figures/
+## Why this matters
+
+Without endpoint-aware filtering and merging, diagnostic plots can silently mix endpoints.
+
+For individual plots, this can create misleading saw-tooth prediction lines because PK and PD values are connected in the same line.
+
+For VPCs, this can create duplicated or inflated simulation datasets because simulation rows are merged to observed metadata using only `ID` and `TIME`.
+
+The patch reduces these risks by making endpoint handling explicit in both plot preparation and VPC simulation processing.
+
+## Limitations
+
+This is a prototype patch.
+
+It modifies functions in the active R session using `assignInNamespace()`.
+
+It does not permanently change the installed `ggPMX` package.
+
+The patch should be validated for each modeling workflow before use in formal reporting.
+
+## Uninstalling the patch in the current session
+
+If needed, restore the original functions:
+
+```r
+ggpmx_uninstall_pkpd_patch()
 ```
 
-## Notes
+Restarting R also restores the original `ggPMX` behavior.
 
-This patch is intended as a practical prototype for endpoint-aware `ggPMX` support with `nlmixr2` PK/PD models.
-
-It is useful when a single fitted model contains multiple observation endpoints and separate diagnostic plots are needed for each endpoint.
-
-The patch is session-based. It uses `assignInNamespace()` to modify selected `ggPMX` functions while the R session is active.
-
-## Disclaimer
-
-This is an experimental workflow intended for model diagnostics and development. Validate all plots and outputs before using them in formal reports or submissions.
