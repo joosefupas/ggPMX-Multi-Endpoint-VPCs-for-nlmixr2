@@ -62,7 +62,7 @@ pk.turnover.emax3 <- function() {
 }
 
 ui <- nlmixr(pk.turnover.emax3)
-
+ui
 ui$multipleEndpoint
 
 summary(warfarin)
@@ -75,6 +75,20 @@ fit.TOS <- nlmixr(
   table = list(cwres = TRUE, npde = TRUE)
 )
 
+fit.TOS
+
+
+
+v1s <- vpcPlot(fit.TOS, show=list(obs_dv=TRUE), scales="free_y") +
+  ylab("Warfarin Cp [mg/L] or PCA") +
+  xlab("Time [h]")
+
+v2s <- vpcPlot(fit.TOS, show=list(obs_dv=TRUE), pred_corr = TRUE) +
+  ylab("Prediction Corrected Warfarin Cp [mg/L] or PCA") +
+  xlab("Time [h]")
+
+v1s
+v2s
 
 ep_pk <- ggPMX::pmx_endpoint(
   code = "cp",
